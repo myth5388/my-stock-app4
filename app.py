@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 
-# [에러 해결 핵심] pykrx가 없어도 앱이 실행되도록 방어막을 칩니다.
+# [안전 장치] pykrx 설치 오류 대비
 try:
     from pykrx import stock
     PYKRX_AVAILABLE = True
@@ -11,15 +11,15 @@ except ImportError:
     PYKRX_AVAILABLE = False
 
 st.set_page_config(page_title="트렌드 마스터 프로", layout="wide")
-st.title("🚀 트렌드 마스터: 최종 배포 성공 버전")
+st.title("🛡️ 트렌드 마스터: 통합 관리 & 추천 시스템")
 
 # 1. 데이터 관리 (세션 상태)
 if 'stocks' not in st.session_state:
     st.session_state.stocks = pd.DataFrame(columns=["코드", "수량", "매수단가", "손절가", "메모"])
 
-# 2. 사이드바: 종목 추가
+# 2. 사이드바: 종목 수동 추가
 with st.sidebar:
-    st.header("➕ 종목 추가")
+    st.header("➕ 종목 수동 추가")
     def add_ticker():
         code = st.session_state.new_code_input.strip()
         if code and code not in st.session_state.stocks['코드'].values:
@@ -33,12 +33,36 @@ with st.sidebar:
         st.session_state.stocks = pd.DataFrame(columns=["코드", "수량", "매수단가", "손절가", "메모"])
         st.rerun()
 
-# 3. 메인 분석 화면
+# 3. 추천 종목 분석 함수 (캐싱으로 속도 향상)
+@st.cache_data(ttl=3600)
+def get_daily_recos():
+    # 시장 주도주 10종목 후보군 (반도체, 전력, 식품, 바이오 등)
+    targets = ["005930", "000660", "003230", "267260", "196170", "000270", "035420", "068270", "005380", "122630"]
+    tickers = [t + ".KS" for t in targets]
+    data = yf.download(tickers, period="3mo", group_by='ticker', progress=False)
+    
+    recos = []
+    for t in targets:
+        tk = t + ".KS"
+        try:
+            df = data[tk].dropna()
+            curr = float(df['Close'].iloc[-1])
+            h20 = float(df['High'].iloc[-21:-1].max())
+            v_avg = float(df['Volume'].iloc[-21:-1].mean())
+            v_curr = float(df['Volume'].iloc[-1])
+            
+            # 조건: 20일 신고가 돌파 & 거래량 1.3배 이상
+            if curr >= h20 and v_curr > v_avg * 1.3:
+                name = yf.Ticker(tk).info.get('shortName', t)
+                recos.append({"이름": name, "코드": t, "현재가": int(curr), "전고점": int(h20)})
+        except: continue
+    return recos
+
+# 4. 메인 분석 화면
 if not st.session_state.stocks.empty:
-    with st.spinner("데이터 분석 중..."):
+    with st.spinner("내 포트폴리오 분석 중..."):
         full_results = []
         analysis_data = {}
-        # 종목 리스트 생성
         tickers = [str(c) + ".KS" if str(c).isdigit() else str(c) for c in st.session_state.stocks['코드']]
         raw_data = yf.download(tickers, period="6mo", group_by='ticker', progress=False)
 
@@ -46,7 +70,6 @@ if not st.session_state.stocks.empty:
             code = str(row['코드'])
             tk = code + ".KS" if code.isdigit() else code
             try:
-                # 데이터 추출
                 df = raw_data[tk].dropna() if len(tickers) > 1 else raw_data.dropna()
                 curr = int(df['Close'].iloc[-1])
                 qty, buy_p, stop = int(row['수량']), int(row['매수단가']), int(row['손절가'])
@@ -61,35 +84,56 @@ if not st.session_state.stocks.empty:
             except: continue
 
     if full_results:
+        st.subheader("📝 내 포트폴리오 현황")
         df_main = pd.DataFrame(full_results)
         edited_df = st.data_editor(df_main[["종목", "수익률", "상태", "수량", "매수단가", "손절가", "현재가", "메모"]], use_container_width=True, hide_index=True)
-        if st.button("💾 변경사항 저장"):
+        if st.button("💾 모든 변경사항 저장"):
             st.session_state.stocks['수량'] = edited_df['수량'].values
             st.session_state.stocks['매수단가'] = edited_df['매수단가'].values
             st.session_state.stocks['손절가'] = edited_df['손절가'].values
             st.session_state.stocks['메모'] = edited_df['메모'].values
             st.rerun()
 
-        # 4. 차트 분석
+        # 차트 분석
         st.divider()
-        sel = st.selectbox("🎯 분석 종목 선택", df_main['종목'].tolist())
+        sel = st.selectbox("🎯 상세 분석 선택", df_main['종목'].tolist())
         if sel in analysis_data:
             target = analysis_data[sel]
-            t1, t2 = st.tabs(["📉 주가 차트", "👥 외인/기관 수급"])
-            with t1:
-                # 차트 에러 방지용 flatten 처리
+            tab1, tab2 = st.tabs(["📉 주가 차트", "👥 수급 데이터"])
+            with tab1:
                 p_df = pd.DataFrame({"주가": target['df']['Close'].values.flatten(), "손절선": target['stop']}, index=target['df'].index)
                 st.line_chart(p_df)
-            with t2:
-                # pykrx 사용 가능 여부 체크
+            with tab2:
                 if PYKRX_AVAILABLE and str(target['code']).isdigit():
                     try:
-                        end_d = datetime.now().strftime("%Y%m%d"); start_d = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-                        inv = stock.get_market_net_purchases_of_equities_by_ticker(start_d, end_d, target['code'])
-                        inv['외인'] = inv['외국인'].cumsum(); inv['기관'] = inv['기관합계'].cumsum()
-                        st.line_chart(inv[['외인', '기관']])
-                    except: st.write("수급 데이터를 가져오는 중입니다...")
-                else:
-                    st.warning("이 환경에서는 수급 분석 기능을 사용할 수 없습니다. (Python 버전 호환성 문제)")
+                        end = datetime.now().strftime("%Y%m%d"); start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+                        inv = stock.get_market_net_purchases_of_equities_by_ticker(start, end, target['code'])
+                        st.line_chart(inv[['외국인', '기관합계']].cumsum())
+                    except: st.write("수급 데이터 대기 중...")
+                else: st.warning("수급 분석 미지원 (Python 버전)")
+
+# 5. [NEW] 오늘의 추천주 섹션
+st.divider()
+st.subheader("🚀 오늘의 추세추종 추천주 (신고가 돌파)")
+st.write("시장의 주도주 중 강력한 **돌파 신호**가 포착된 종목입니다.")
+
+if st.button("🔍 추천 종목 스캔 시작"):
+    with st.spinner("시장 주도주 데이터를 분석 중입니다..."):
+        recos = get_daily_recos()
+        if recos:
+            cols = st.columns(len(recos))
+            for i, item in enumerate(recos):
+                with cols[i]:
+                    st.success(f"**{item['이름']}**")
+                    st.write(f"추천가: {item['현재가']:,.0f}원")
+                    if st.button(f"포트폴리오 추가", key=f"rec_{item['코드']}"):
+                        if item['코드'] not in st.session_state.stocks['코드'].values:
+                            new_data = pd.DataFrame([{"코드": item['코드'], "수량": 1, "매수단가": item['현재가'], "손절가": item['전고점'], "메모": "추천주 자동추가"}])
+                            st.session_state.stocks = pd.concat([st.session_state.stocks, new_data], ignore_index=True)
+                            st.rerun()
+                        else:
+                            st.toast(f"{item['이름']}은(는) 이미 리스트에 있습니다!")
+        else:
+            st.info("현재 돌파 조건을 만족하는 강력한 주도주가 없습니다. 관망을 추천합니다.")
 else:
-    st.info("👈 왼쪽 사이드바에서 종목 번호를 입력하고 Enter를 누르세요.")
+    st.write("버튼을 누르면 현재 시장에서 가장 힘이 좋은 종목을 분석합니다.")
