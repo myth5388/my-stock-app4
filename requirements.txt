@@ -3,4 +3,3 @@ yfinance
 pandas
 pykrx
 setuptools
-numpy
