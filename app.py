@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 
-# [안전 장치] 수급 데이터 부품 체크
+# [안전 장치]
 try:
     from pykrx import stock
     PYKRX_AVAILABLE = True
@@ -26,7 +26,7 @@ with st.sidebar:
             new_row = pd.DataFrame([{"코드": code, "수량": 1, "매수단가": 0, "손절가": 0, "메모": ""}])
             st.session_state.stocks = pd.concat([st.session_state.stocks, new_row], ignore_index=True)
             st.session_state.new_code = "" 
-    st.text_input("종목 번호(Enter)", key="new_code", on_change=add_ticker)
+    st.text_input("종목 번호 입력 후 Enter", key="new_code", on_change=add_ticker)
     
     st.divider()
     if st.button("🗑️ 리스트 비우기"):
@@ -41,16 +41,20 @@ if not st.session_state.stocks.empty:
         
         for idx, row in st.session_state.stocks.iterrows():
             code = str(row['코드'])
-            tk = code + ".KS" if code.isdigit() else code
+            # [수정] Ticker 객체를 사용해 더 안정적으로 데이터 수집
+            tk = code + ".KS" if (code.isdigit() and len(code)==6) else code
             try:
-                # [안전 장치] 데이터를 가져올 때 에러가 나면 해당 종목은 건너뜀
-                df = yf.download(tk, period="6mo", progress=False)
-                if df.empty and code.isdigit():
+                stock_obj = yf.Ticker(tk)
+                df = stock_obj.history(period="6mo")
+                
+                # 코스피에서 실패하면 코스닥(.KQ)으로 한 번 더 시도
+                if df.empty and ".KS" in tk:
                     tk = code + ".KQ"
-                    df = yf.download(tk, period="6mo", progress=False)
+                    stock_obj = yf.Ticker(tk)
+                    df = stock_obj.history(period="6mo")
                 
                 if df.empty:
-                    st.warning(f"⚠️ {code} 종목 데이터를 찾을 수 없어 제외합니다.")
+                    st.warning(f"⚠️ {code} 종목 데이터를 가져올 수 없습니다. 번호를 확인하세요.")
                     continue
 
                 curr = int(df['Close'].iloc[-1])
@@ -63,7 +67,7 @@ if not st.session_state.stocks.empty:
                     "수량": qty, "매수단가": buy_p, "손절가": stop, "현재가": curr, "메모": row['메모'], "코드": code
                 })
                 analysis_data[tk] = {"df": df, "stop": stop, "code": code}
-            except Exception as e:
+            except:
                 continue
 
     if full_results:
@@ -72,25 +76,15 @@ if not st.session_state.stocks.empty:
         edited_df = st.data_editor(df_main[["종목", "수익률", "상태", "수량", "매수단가", "손절가", "현재가", "메모"]], use_container_width=True, hide_index=True)
         
         if st.button("💾 저장"):
-            # 화면에 남은 종목들만 저장 (잘못된 종목은 자동 제거됨)
             st.session_state.stocks = edited_df[["코드", "수량", "매수단가", "손절가", "메모"]]
             st.rerun()
 
-        # 4. 차트 및 수급 분석 (선택 박스)
+        # 차트 분석
         st.divider()
-        sel = st.selectbox("🎯 분석 종목", df_main['종목'].tolist())
+        sel = st.selectbox("🎯 상세 분석 선택", df_main['종목'].tolist())
         if sel in analysis_data:
             target = analysis_data[sel]
-            t1, t2 = st.tabs(["📉 차트", "👥 수급"])
-            with t1:
-                p_df = pd.DataFrame({"주가": target['df']['Close'].values.flatten(), "손절선": target['stop']}, index=target['df'].index)
-                st.line_chart(p_df)
-            with t2:
-                if PYKRX_AVAILABLE and str(target['code']).isdigit():
-                    try:
-                        end_d = datetime.now().strftime("%Y%m%d"); start_d = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-                        inv = stock.get_market_net_purchases_of_equities_by_ticker(start_d, end_d, target['code'])
-                        st.line_chart(inv[['외국인', '기관합계']].cumsum())
-                    except: st.write("수급 데이터 대기 중...")
+            p_df = pd.DataFrame({"주가": target['df']['Close'].values.flatten(), "손절선": target['stop']}, index=target['df'].index)
+            st.line_chart(p_df)
 else:
-    st.info("👈 왼쪽에서 올바른 종목 번호를 입력하세요.")
+    st.info("👈 왼쪽 사이드바에 종목 번호(예: 005930)를 입력하고 Enter를 누르세요.")
