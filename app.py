@@ -17,7 +17,7 @@ st.title("🚀 트렌드 마스터: 스마트 관리 시스템")
 if 'stocks' not in st.session_state:
     st.session_state.stocks = pd.DataFrame(columns=["코드", "수량", "매수단가", "손절가", "메모"])
 
-# [보조 함수] 한글 이름 찾기 (성능 개선)
+# [보조 함수] 한글 이름 찾기
 def get_kr_name(code):
     if not PYKRX_AVAILABLE: return code
     try:
@@ -38,7 +38,7 @@ with st.sidebar:
             if '코드' in load_df.columns:
                 load_df['코드'] = load_df['코드'].astype(str).str.zfill(6)
                 st.session_state.stocks = pd.concat([st.session_state.stocks, load_df], ignore_index=True).drop_duplicates(subset=['코드'], keep='last')
-                st.success("데이터를 불러왔습니다!")
+                st.success("불러오기 완료!")
             else: st.error("'코드' 열이 없습니다.")
         except: st.error("파일 읽기 실패")
 
@@ -54,30 +54,36 @@ with st.sidebar:
                 st.rerun()
             else: st.warning("이미 있는 종목입니다.")
 
-    # 3. [종목별 개별 삭제] 
+    # [핵심 수정] 종목별 개별 삭제 기능을 가장 강력하게 수정
     if not st.session_state.stocks.empty:
         st.divider()
         st.header("🗑️ 종목 삭제")
-        codes = st.session_state.stocks['코드'].tolist()
-        delete_target = st.selectbox("삭제할 종목", codes, format_func=lambda x: f"{get_kr_name(x)} ({x})")
-        if st.button("❌ 선택 종목 삭제"):
-            st.session_state.stocks = st.session_state.stocks[st.session_state.stocks['코드'] != delete_target]
-            st.success("삭제되었습니다!")
-            st.rerun()
+        # 현재 리스트에 있는 종목들을 이름과 함께 보여줌
+        codes_for_delete = st.session_state.stocks['코드'].tolist()
+        delete_target = st.selectbox(
+            "삭제할 종목 선택", 
+            codes_for_delete, 
+            format_func=lambda x: f"{get_kr_name(x)} ({x})"
+        )
+        
+        if st.button("❌ 선택 종목 삭제", use_container_width=True):
+            # 메모리(Session State)에서 즉시 제거
+            st.session_state.stocks = st.session_state.stocks[st.session_state.stocks['코드'] != delete_target].reset_index(drop=True)
+            st.success(f"삭제되었습니다!")
+            st.rerun() # 화면을 강제로 다시 그려서 즉시 반영
 
-# 4. 분석 및 화면 표시
+# 3. 분석 및 화면 표시
 if not st.session_state.stocks.empty:
     full_results = []
     chart_data_dict = {}
     
-    with st.spinner("최신 시장 데이터와 연결 중..."):
+    with st.spinner("데이터 분석 중..."):
         for idx, row in st.session_state.stocks.iterrows():
             code = str(row['코드']).zfill(6)
             kn = get_kr_name(code)
             
-            # 주가 데이터 가져오기 로직 강화
             try:
-                # 코스피(.KS) 우선 시도, 실패 시 코스닥(.KQ) 시도
+                # 데이터 수집 (Ticker 방식)
                 tk_obj = yf.Ticker(code + ".KS")
                 df = tk_obj.history(period="3mo")
                 if df.empty:
@@ -85,13 +91,10 @@ if not st.session_state.stocks.empty:
                     df = tk_obj.history(period="3mo")
                 
                 if not df.empty:
-                    curr = int(df['Close'].iloc[-1])
+                    last_close = df['Close'].iloc[-1]
+                    curr = int(last_close.iloc if hasattr(last_close, 'iloc') else last_close)
                     qty, buy, stop = int(row['수량']), int(row['매수단가']), int(row['손절가'])
-                    
-                    # 손절가 자동 설정 (20일 신고가의 95%)
-                    if stop == 0 or stop > curr * 2: # 비정상적으로 큰 값 방지
-                        stop = int(df['High'].max() * 0.95)
-                    
+                    if stop == 0 or stop > curr * 2: stop = int(df['High'].max() * 0.95)
                     profit = ((curr - buy) / buy * 100) if buy > 0 else 0
                     status = "🚨위험" if curr <= stop else "✅유지"
                     chart_data_dict[kn] = {"df": df, "stop": stop}
@@ -111,7 +114,7 @@ if not st.session_state.stocks.empty:
                 })
 
     if full_results:
-        st.subheader("📋 내 포트폴리오 (수정 후 저장 버튼을 누르세요)")
+        st.subheader("📋 내 포트폴리오 (수정 후 저장 버튼 필수!)")
         df_main = pd.DataFrame(full_results)
         
         # 편집 표
@@ -121,20 +124,20 @@ if not st.session_state.stocks.empty:
             disabled=["종목명", "수익률", "상태", "현재가"]
         )
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("💾 변경사항 저장", type="primary"):
-                # 인덱스 기반으로 원본 '코드'와 매칭하여 저장
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("💾 변경사항 저장", type="primary", use_container_width=True):
+                # 편집된 표와 원래의 '코드'를 매칭하여 메모리 갱신
                 new_data = edited_df.copy()
                 new_data['코드'] = df_main['코드'].values
                 st.session_state.stocks = new_data[["코드", "수량", "매수단가", "손절가", "메모"]]
                 st.success("저장 완료!")
                 st.rerun()
-        with col2:
+        with c2:
             csv = st.session_state.stocks.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 백업(CSV) 다운로드", data=csv, file_name="my_stocks.csv")
+            st.download_button("📥 백업(CSV) 다운로드", data=csv, file_name="my_stocks.csv", use_container_width=True)
 
-        # 5. 차트 상세 분석
+        # 4. 차트 분석
         if chart_data_dict:
             st.divider()
             sel = st.selectbox("🎯 차트 분석 종목", list(chart_data_dict.keys()))
