@@ -11,13 +11,13 @@ except:
     PYKRX_AVAILABLE = False
 
 st.set_page_config(page_title="트렌드 마스터 프로", layout="wide")
-st.title("🚀 트렌드 마스터: 한글 종목 분석 시스템")
+st.title("🚀 트렌드 마스터: 최종 안정화 버전")
 
 # 1. 데이터 저장소 초기화
 if 'stocks' not in st.session_state:
     st.session_state.stocks = pd.DataFrame(columns=["코드", "수량", "매수단가", "손절가", "메모"])
 
-# [보조 함수] 한글 이름 찾기 (더 튼튼하게 보강)
+# [보조 함수] 한글 이름 찾기
 def get_kr_name(code):
     if not PYKRX_AVAILABLE: return code
     try:
@@ -29,18 +29,32 @@ def get_kr_name(code):
 # 2. 사이드바 구성
 with st.sidebar:
     st.header("💾 데이터 복구 (CSV)")
-    uploaded_file = st.file_uploader("백업 파일을 선택하세요", type=["csv"])
+    # 업로드 즉시 실행되도록 로직 변경
+    uploaded_file = st.file_uploader("백업 파일을 선택하세요", type=["csv"], key="uploader")
+    
     if uploaded_file is not None:
-        if st.button("📂 데이터 합치기"):
+        try:
+            # 다양한 인코딩 시도 (UTF-8-SIG, CP949 순서)
             try:
-                load_df = pd.read_csv(uploaded_file)
-                if '코드' in load_df.columns:
-                    load_df['코드'] = load_df['코드'].astype(str).str.zfill(6)
-                    combined = pd.concat([st.session_state.stocks, load_df], ignore_index=True)
-                    st.session_state.stocks = combined.drop_duplicates(subset=['코드'], keep='last')
-                    st.success("불러오기 성공!")
-                    st.rerun()
-            except: st.error("파일 읽기 실패")
+                load_df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
+            except:
+                uploaded_file.seek(0)
+                load_df = pd.read_csv(uploaded_file, encoding='cp949')
+            
+            # 열 이름 표준화 (공백 제거 등)
+            load_df.columns = load_df.columns.str.strip()
+            
+            if '코드' in load_df.columns:
+                # 0 채우기 및 데이터 정리
+                load_df['코드'] = load_df['코드'].astype(str).str.zfill(6)
+                # 기존 데이터와 병합 (중복 제거)
+                st.session_state.stocks = pd.concat([st.session_state.stocks, load_df], ignore_index=True).drop_duplicates(subset=['코드'], keep='last')
+                st.success("데이터를 성공적으로 불러왔습니다!")
+                # 업로드 후 파일 초기화를 위해 rerun 사용하지 않고 상태 유지
+            else:
+                st.error("'코드'라는 이름의 열을 찾을 수 없습니다.")
+        except Exception as e:
+            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
 
     st.divider()
     st.header("➕ 종목 추가")
@@ -65,14 +79,12 @@ if not st.session_state.stocks.empty:
     chart_data_dict = {}
     
     with st.spinner("데이터 분석 중..."):
-        # 모든 종목을 한꺼번에 분석 시도
         for idx, row in st.session_state.stocks.iterrows():
             code = str(row['코드']).zfill(6)
             tk = code + ".KS"
             kn = get_kr_name(code)
             
             try:
-                # 데이터를 못 가져오더라도 줄은 생기게 기본값 설정
                 curr, profit, status = 0, 0, "⚠️조회불가"
                 df = yf.download(tk, period="3mo", progress=False)
                 if df.empty:
@@ -80,50 +92,63 @@ if not st.session_state.stocks.empty:
                     df = yf.download(tk, period="3mo", progress=False)
                 
                 if not df.empty:
-                    curr = int(df['Close'].iloc[-1])
-                    qty, buy, stop = int(row['수량']), int(row['매수단가']), int(row['손절가'])
-                    if stop == 0: stop = int(df['High'].max() * 0.95)
+                    # 데이터가 있을 때만 계산
+                    last_close = df['Close'].iloc[-1]
+                    # yfinance 업데이트 대응 (단일값 추출)
+                    curr = int(last_close.iloc[0] if hasattr(last_close, 'iloc') else last_close)
+                    
+                    qty = int(row['수량'])
+                    buy = int(row['매수단가'])
+                    stop = int(row['손절가'])
+                    
+                    if stop == 0:
+                        high_val = df['High'].max()
+                        high_val = high_val.iloc[0] if hasattr(high_val, 'iloc') else high_val
+                        stop = int(high_val * 0.95)
+                    
                     profit = ((curr - buy) / buy * 100) if buy > 0 else 0
                     status = "🚨위험" if curr <= stop else "✅유지"
                     chart_data_dict[kn] = {"df": df, "stop": stop}
                 
                 full_results.append({
                     "종목명": kn, "수익률": f"{profit:.1f}%", "상태": status,
-                    "수량": row['수량'], "매수단가": row['매수단가'], "손절가": row['손절가'],
+                    "수량": row['수량'], "매수단가": row['매수단가'], "손절가": stop,
                     "현재가": curr, "메모": row['메모'], "코드": code
                 })
             except:
-                continue
+                # 에러 발생 시에도 빈 줄은 추가
+                full_results.append({
+                    "종목명": kn, "수익률": "0.0%", "상태": "⚠️오류",
+                    "수량": row['수량'], "매수단가": row['매수단가'], "손절가": row['손절가'],
+                    "현재가": 0, "메모": row['메모'], "코드": code
+                })
 
     if full_results:
         st.subheader("📋 내 포트폴리오 현황")
         df_main = pd.DataFrame(full_results)
         
-        # 표 출력
         edited_df = st.data_editor(
             df_main[["종목명", "수익률", "상태", "수량", "매수단가", "손절가", "현재가", "메모"]],
             use_container_width=True, hide_index=True, key="main_editor",
             disabled=["종목명", "수익률", "상태", "현재가"]
         )
         
-        # 저장 버튼
         if st.button("💾 변경사항 저장", type="primary"):
-            # 편집된 표와 원래 코드를 안전하게 매칭
             new_stocks = edited_df.copy()
             new_stocks['코드'] = df_main['코드'].values
             st.session_state.stocks = new_stocks[["코드", "수량", "매수단가", "손절가", "메모"]]
             st.success("저장 완료!")
             st.rerun()
 
-        # 4. 차트 상세 분석
-        st.divider()
+        # 4. 차트 분석
         if chart_data_dict:
+            st.divider()
             sel = st.selectbox("🎯 차트 분석 종목", list(chart_data_dict.keys()))
             target = chart_data_dict[sel]
-            plot_df = pd.DataFrame({
-                "주가": target['df']['Close'].values.flatten(), 
-                "손절선": target['stop']
-            }, index=target['df'].index)
-            st.line_chart(plot_df)
+            # 차트 데이터 준비
+            c_df = pd.DataFrame(index=target['df'].index)
+            c_df['주가'] = target['df']['Close'].values.flatten()
+            c_df['손절선'] = target['stop']
+            st.line_chart(c_df)
 else:
-    st.info("👈 왼쪽에서 종목 번호를 입력하거나 백업 파일을 불러오세요.")
+    st.info("👈 왼쪽에서 파일을 불러오거나 종목을 추가하세요.")
